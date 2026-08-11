@@ -395,6 +395,11 @@ button {
   display: flex;
 }
 
+.session-item-row:hover .pin-mark,
+.session-item-row:focus-within .pin-mark {
+  display: none;
+}
+
 .session-action {
   display: inline-flex;
   align-items: center;
@@ -426,6 +431,16 @@ button {
   flex: none;
 }
 
+.pin-action {
+  color: #8a9a9e;
+}
+
+.pin-action.pinned,
+.pin-action:hover:not(:disabled),
+.pin-action:focus-visible {
+  color: #d8b572;
+}
+
 .hide-action {
   color: #b79788;
 }
@@ -436,9 +451,11 @@ button {
 }
 
 .pin-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
   color: #d8b572;
-  font-size: 10px;
 }
 
 .partial-mark {

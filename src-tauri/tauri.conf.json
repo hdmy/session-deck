@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Context Vault",
+  "productName": "Session Deck",
   "version": "0.1.0",
-  "identifier": "dev.contextvault.desktop",
+  "identifier": "dev.sessiondeck.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://127.0.0.1:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Context Vault",
+        "title": "Session Deck",
         "width": 1280,
         "height": 800,
         "minWidth": 900,

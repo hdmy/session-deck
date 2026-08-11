@@ -1,15 +1,15 @@
-# Context Vault Engineering Rules
+# Session Deck Engineering Rules
 
 ## Product Scope
 
-Context Vault is a local-first desktop reader, search index, and controlled
+Session Deck is a local-first desktop reader, search index, and controlled
 continuation launcher for AI coding sessions. The first provider is Claude
 Code. Provider session files are the source of truth for historical context.
 
 ## Safety Invariants
 
-- Treat configured provider roots as read-only from Context Vault code. Never rename, lock, delete, truncate, or rewrite provider files.
-- A provider-owned CLI may update its own transcript only after an explicit user continuation action. Context Vault must launch it with validated executable/argument arrays, never a shell command string.
+- Treat configured provider roots as read-only from Session Deck code. Never rename, lock, delete, truncate, or rewrite provider files.
+- A provider-owned CLI may update its own transcript only after an explicit user continuation action. Session Deck must launch it with validated executable/argument arrays, never a shell command string.
 - Do not start continuation while a scan is active, and do not scan a session while its continuation process is active. Re-index it after the process exits.
 - Do not add telemetry, analytics, remote assets, cloud APIs, or network calls.
 - Do not implement provider login, remote-control, teleport, or cloud-session flows.

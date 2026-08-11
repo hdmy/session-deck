@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Only bundled main-window code may invoke registered Context Vault commands.",
+  "description": "Only bundled main-window code may invoke registered Session Deck commands.",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

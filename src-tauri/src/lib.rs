@@ -48,5 +48,5 @@ pub fn run() {
             commands::close_continuation
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Context Vault");
+        .expect("error while running Session Deck");
 }

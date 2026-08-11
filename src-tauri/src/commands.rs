@@ -1888,7 +1888,7 @@ pub fn start_fork_continuation(
         }
     };
     // This is the final raw-path check.  The remaining target race is only the
-    // provider's random-UUID file creation at spawn; Context Vault never
+    // provider's random-UUID file creation at spawn; Session Deck never
     // creates or writes provider transcript files.
     let second_paths = match validate_fork_paths(
         &configured_root,

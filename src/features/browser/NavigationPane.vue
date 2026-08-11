@@ -50,7 +50,7 @@ const { t } = useI18n();
 
 <template>
   <aside class="nav-pane" :aria-label="t('sessionNavigation')">
-    <div class="brand"><span class="brand-mark">✦</span><span>Context Vault</span></div>
+    <div class="brand"><span class="brand-mark">✦</span><span>Session Deck</span></div>
     <SearchBox :model-value="query" @update:model-value="emit('search', $event)" />
     <ProviderFilter
       :providers="providers"

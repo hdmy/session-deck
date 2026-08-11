@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Only bundled main-window code may invoke registered Context Vault commands.","local":true,"windows":["main"],"permissions":["core:default"]}}
+{"default":{"identifier":"default","description":"Only bundled main-window code may invoke registered Session Deck commands.","local":true,"windows":["main"],"permissions":["core:default"]}}

@@ -1,5 +1,5 @@
 [package]
-name = "context-vault"
+name = "session-deck"
 version = "0.1.0"
 edition = "2021"
 

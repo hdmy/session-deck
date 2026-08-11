@@ -1,4 +1,4 @@
-# Context Vault 任务清单
+# Session Deck 任务清单
 
 > 按此前确认的优先级整理。`[x]` 表示已实现并完成自动化验证，`[ ]` 表示待做或待人工验收。
 >
@@ -21,7 +21,7 @@
 - [x] 确定本地优先 Desktop App 形态：Tauri 2 + Vue 3 + Rust。
 - [x] 建立 provider-neutral 模块边界：scanner、parser、indexer、storage、search、viewer、runtime。
 - [x] 参考 Claude Code VS Code extension 的历史浏览与续聊能力，吸收 resume/terminal 等本地能力，同时排除登录、云端和远程控制。
-- [x] 建立 Claude continuation ADR：Context Vault 不重写 JSONL，续聊由 Claude CLI 负责。
+- [x] 建立 Claude continuation ADR：Session Deck 不重写 JSONL，续聊由 Claude CLI 负责。
 - [x] 建立 conversation graph/read-model ADR：文件顺序不直接等于用户看到的对话顺序。
 - [x] 遵循 Claude 源文件保留逻辑：源文件被清理后，完整扫描才从本地派生索引中移除对应记录。
 
@@ -104,7 +104,7 @@
 
 ### 本地 Session 管理
 
-- [x] “隐藏” Session：只从 Context Vault 本地索引隐藏，不删除 Claude 原始记录。
+- [x] “隐藏” Session：只从 Session Deck 本地索引隐藏，不删除 Claude 原始记录。
 - [x] 取消隐藏 / 恢复隐藏 Session。
 - [x] 本地重命名 Session 标题，不写入原始 JSONL。
 - [x] 本地 pin / 最近使用排序。
@@ -156,8 +156,8 @@
 - 登录、用户系统、多人协作。
 - 云同步、远程 Session、Remote Teleport。
 - 将代码、prompt、回复或 transcript 上传到服务器。
-- Context Vault 直接修改、删除或重写 Claude 原始 JSONL。
-- 在 Context Vault 内重实现 Claude Agent、权限系统或完整 streaming SDK。
+- Session Deck 直接修改、删除或重写 Claude 原始 JSONL。
+- 在 Session Deck 内重实现 Claude Agent、权限系统或完整 streaming SDK。
 
 ## 开始下一阶段的门槛
 
