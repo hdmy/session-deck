@@ -1,0 +1,9 @@
+node_modules/
+.pnpm-store/
+dist/
+src-tauri/target/
+.DS_Store
+*.db
+*.db-shm
+*.db-wal
+*.log
