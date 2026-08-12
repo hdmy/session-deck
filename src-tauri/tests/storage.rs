@@ -672,6 +672,44 @@ fn schema_migration_namespaces_legacy_rows_with_a_provider() {
 }
 
 #[test]
+fn v13_migration_reindexes_only_gemini_sources() {
+    let database = tempdir().expect("create database root");
+    let path = database.path().join("v12.db");
+    let connection = storage::open(&path).expect("create current database");
+    connection
+        .execute_batch(
+            "INSERT INTO sessions
+                (id, provider_id, project_id, title, models, tool_count, source_mtime, partial)
+             VALUES
+                ('claude:one', 'claude', 'project', 'Claude', '[]', 0, 0, 0),
+                ('gemini:one', 'gemini', 'gemini:hash', 'Gemini', '[]', 0, 0, 0);
+             INSERT INTO source_files
+                (provider_id, path, native_session_id, session_id, size, mtime, hash)
+             VALUES
+                ('claude', '/sources/claude.jsonl', 'one', 'claude:one', 1, 1, 'hash'),
+                ('gemini', '/sources/gemini.jsonl', 'one', 'gemini:one', 1, 1, 'hash');
+             PRAGMA user_version = 12;",
+        )
+        .expect("create v12 fixture");
+
+    storage::migrate(&connection).expect("migrate v12 fixture");
+    storage::migrate(&connection).expect("rerun migration");
+
+    let source_providers = connection
+        .prepare("SELECT provider_id FROM source_files ORDER BY provider_id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let session_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(source_providers, ["claude"]);
+    assert_eq!(session_count, 2);
+}
+
+#[test]
 fn v7_relation_migration_preserves_rows_and_is_idempotent() {
     let database = tempdir().expect("create database root");
     let path = database.path().join("v7.db");
@@ -815,6 +853,7 @@ fn v8_to_current_migration_preserves_local_rows_and_is_idempotent() {
              ALTER TABLE claude_settings DROP COLUMN source_root;
              ALTER TABLE claude_settings DROP COLUMN scan_interval_seconds;
              ALTER TABLE claude_settings DROP COLUMN enabled_provider_ids;
+             ALTER TABLE claude_settings DROP COLUMN provider_lookback_days;
              PRAGMA user_version = 8;",
         )
         .expect("downgrade fixture to v8 shape");
@@ -846,6 +885,10 @@ fn v8_to_current_migration_preserves_local_rows_and_is_idempotent() {
             .enabled_provider_ids,
         vec!["claude"]
     );
+    assert!(storage::claude_scan_settings(&connection)
+        .unwrap()
+        .provider_lookback_days
+        .is_empty());
 }
 
 #[test]
@@ -885,13 +928,69 @@ fn scan_settings_default_to_claude_and_prune_disabled_provider_rows() {
 }
 
 #[test]
+fn scan_settings_persist_agent_lookbacks_and_invalidate_opencode_fingerprints() {
+    let database = tempdir().expect("create database root");
+    let mut connection = storage::open(&database.path().join("index.db")).expect("open database");
+    let mut settings = storage::claude_scan_settings(&connection).expect("read scan settings");
+    settings.enabled_provider_ids = vec!["claude".into(), "opencode".into()];
+    storage::update_claude_scan_settings(&mut connection, &settings).expect("enable opencode");
+    connection
+        .execute_batch(
+            "INSERT INTO sessions
+                (id, provider_id, native_session_id, project_id, title, models, tool_count, source_mtime, partial)
+             VALUES ('opencode:one', 'opencode', 'one', 'project', 'OpenCode', '[]', 0, 0, 0);
+             INSERT INTO source_files
+                (provider_id, path, native_session_id, session_id, size, mtime, hash)
+             VALUES ('opencode', '/tmp/opencode.db', 'one', 'opencode:one', 1, 1, 'hash');",
+        )
+        .expect("seed opencode fingerprint");
+
+    settings
+        .provider_lookback_days
+        .insert("opencode".into(), 30);
+    storage::update_claude_scan_settings(&mut connection, &settings).expect("save lookback");
+
+    assert_eq!(
+        storage::claude_scan_settings(&connection)
+            .unwrap()
+            .provider_lookback_days
+            .get("opencode"),
+        Some(&30)
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_files WHERE provider_id = 'opencode'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE provider_id = 'opencode'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
 fn future_schema_version_is_rejected_without_schema_changes() {
     let database = tempdir().expect("create database root");
     let connection = rusqlite::Connection::open(database.path().join("future.db"))
         .expect("open future database");
     connection
-        .execute_batch("CREATE TABLE sentinel (value TEXT); PRAGMA user_version = 13;")
+        .execute_batch("CREATE TABLE sentinel (value TEXT);")
         .expect("create future schema");
+    let future_version = storage::SCHEMA_VERSION + 1;
+    connection
+        .pragma_update(None, "user_version", future_version)
+        .expect("set future schema version");
 
     let error = storage::migrate(&connection).unwrap_err();
 
@@ -906,7 +1005,7 @@ fn future_schema_version_is_rejected_without_schema_changes() {
         )
         .expect("check rollback");
     assert!(error.to_string().contains("newer than supported"));
-    assert_eq!(version, 13);
+    assert_eq!(version, future_version);
     assert!(!sessions_exist);
 }
 

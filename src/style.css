@@ -757,11 +757,15 @@ button {
 }
 
 .reader h1 {
+  display: -webkit-box;
+  overflow: hidden;
   margin: 11px 0 7px;
   color: #f1f4f5;
   font-size: 25px;
   font-weight: 620;
   line-height: 1.25;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .reader-sub {

@@ -18,7 +18,7 @@ const emit = defineEmits<{
   close: [];
   saved: [];
   rootActivated: [report: ScanReport];
-  scanSettingsChanged: [settings: ScanSettings, providersChanged: boolean];
+  scanSettingsChanged: [settings: ScanSettings, scanScopeChanged: boolean];
 }>();
 
 const panel = useTemplateRef<HTMLElement>('panel');
@@ -34,6 +34,7 @@ const sourceRoot = shallowRef('');
 const replaceConfirmed = shallowRef(false);
 const intervalSeconds = shallowRef(0);
 const enabledProviderIds = shallowRef<ProviderId[]>(['claude']);
+const providerLookbackDays = shallowRef<Partial<Record<ProviderId, number>>>({});
 const preview = shallowRef<ResumePreview | null>(null);
 const loading = shallowRef(true);
 const claudeLoading = shallowRef(true);
@@ -103,6 +104,7 @@ async function loadScanSettings() {
     sourceRoot.value = scan.source_root ?? '';
     intervalSeconds.value = scan.scan_interval_seconds;
     enabledProviderIds.value = [...scan.enabled_provider_ids];
+    providerLookbackDays.value = { ...scan.provider_lookback_days };
     scanReady.value = true;
   } catch (cause) {
     if (token === settingsGeneration) {
@@ -151,7 +153,7 @@ async function saveClaude() {
     settings.value = await api.updateClaudeSettings({ executableOverride: executable.value.trim() || null, dangerouslySkipPermissions: skipPermissions.value, riskAcknowledged: riskAcknowledged.value });
     if (shouldSaveScan) {
       const scanResult = await persistScanSettings();
-      if (scanResult) emit('scanSettingsChanged', scanResult.settings, scanResult.providersChanged);
+      if (scanResult) emit('scanSettingsChanged', scanResult.settings, scanResult.scanScopeChanged);
     }
     setLocale(localeDraft.value);
     riskAcknowledged.value = false; notice.value = t('savedClaudeSettings'); emit('saved');
@@ -159,22 +161,27 @@ async function saveClaude() {
   finally { saving.value = false; }
 }
 
-async function persistScanSettings(): Promise<{ settings: ScanSettings; providersChanged: boolean } | null> {
+async function persistScanSettings(): Promise<{ settings: ScanSettings; scanScopeChanged: boolean } | null> {
   const current = scanSettings.value;
   if (!current) return null;
   scanSaving.value = true;
   try {
     const previous = current.enabled_provider_ids;
+    const previousLookbacks = current.provider_lookback_days;
     const next = await api.updateScanSettings({
       scan_interval_seconds: intervalSeconds.value,
       enabled_provider_ids: enabledProviderIds.value,
+      provider_lookback_days: providerLookbackDays.value,
     });
     const providersChanged = previous.length !== next.enabled_provider_ids.length
       || previous.some((id) => !next.enabled_provider_ids.includes(id));
+    const lookbacksChanged = Object.keys({ ...previousLookbacks, ...next.provider_lookback_days })
+      .some((id) => previousLookbacks[id] !== next.provider_lookback_days[id]);
     scanSettings.value = next;
     intervalSeconds.value = next.scan_interval_seconds;
     enabledProviderIds.value = [...next.enabled_provider_ids];
-    return { settings: next, providersChanged };
+    providerLookbackDays.value = { ...next.provider_lookback_days };
+    return { settings: next, scanScopeChanged: providersChanged || lookbacksChanged };
   } finally {
     scanSaving.value = false;
   }
@@ -188,8 +195,8 @@ async function saveScanSettings() {
   try {
     const result = await persistScanSettings();
     if (result) {
-      notice.value = result.providersChanged ? t('scanSettingsSavedProviders') : t('scanSettingsSaved');
-      emit('scanSettingsChanged', result.settings, result.providersChanged);
+      notice.value = result.scanScopeChanged ? t('scanSettingsSavedProviders') : t('scanSettingsSaved');
+      emit('scanSettingsChanged', result.settings, result.scanScopeChanged);
     }
   } catch (cause) { error.value = message(cause); }
 }
@@ -259,19 +266,18 @@ onUnmounted(() => { document.removeEventListener('keydown', onKey); restoreFocus
         <p v-if="scanLoading" class="field-help" role="status">{{ t('scanSettingsLoading') }}</p>
         <p v-else-if="scanLoadError" class="settings-error" role="alert">{{ t('scanSettingsUnavailable', { value: scanLoadError }) }}</p>
         <SourceRootForm v-if="scanReady && scanSettings" v-model:source-root="sourceRoot" v-model:replace-confirmed="replaceConfirmed" :effective-root="scanSettings.effective_root ?? ''" :disabled="gateBusy || !scanReady || anySaving || !claudeImportEnabled" :disabled-reason="rootDisabledReason" :saving="rootSaving" @activate="activateRoot" />
-        <ScanScheduleForm v-if="scanReady && scanSettings" v-model:interval-seconds="intervalSeconds" v-model:enabled-provider-ids="enabledProviderIds" :providers="providers ?? []" :disabled="gateBusy || !scanReady || anySaving" :disabled-reason="gateReason" :saving="scanSaving" @save="saveScanSettings" />
+        <ScanScheduleForm v-if="scanReady && scanSettings" v-model:interval-seconds="intervalSeconds" v-model:enabled-provider-ids="enabledProviderIds" v-model:provider-lookback-days="providerLookbackDays" :providers="providers ?? []" :disabled="gateBusy || !scanReady || anySaving" :disabled-reason="gateReason" :saving="scanSaving" @save="saveScanSettings" />
         <IndexDiagnosticsPanel :diagnostics="diagnostics" :loading="diagnosticsLoading" :error="diagnosticsError" />
         <div class="settings-divider"></div>
         <div class="preflight-block"><div class="preflight-title"><span>{{ t('continuationPreflight') }}</span><button type="button" class="secondary-button" :disabled="!session" @click="preflight">{{ session ? t('checkSelectedSession') : t('selectSessionFirst') }}</button></div><p v-if="!session" class="field-help">{{ t('selectClaudeHelp') }}</p><dl v-if="preview" class="preview-list"><dt>{{ t('resolvedExecutable') }}</dt><dd>{{ preview.resolved_executable }}</dd><dt>{{ t('version') }}</dt><dd>{{ preview.version || t('unavailable') }}</dd><dt>{{ t('historicalCwd') }}</dt><dd>{{ preview.cwd }}</dd><dt>{{ t('readOnlyCommandPreview') }}</dt><dd><code>{{ preview.command_preview }}</code></dd></dl></div>
-        <p v-if="error" class="settings-error" role="alert">{{ error }}</p><p v-if="notice" class="settings-notice" role="status">{{ notice }}</p>
         </div>
-        <footer class="settings-footer"><button type="button" class="secondary-button" @click="close">{{ t('cancel') }}</button><button class="primary-button" type="submit" :disabled="saving || !claudeReady || anySaving">{{ saving ? t('saving') : t('saveSettings') }}</button></footer>
+        <footer class="settings-footer"><div class="settings-feedback"><p v-if="error" class="settings-error" role="alert">{{ error }}</p><p v-if="notice" class="settings-notice" role="status">{{ notice }}</p></div><div class="settings-actions"><button type="button" class="secondary-button" @click="close">{{ t('cancel') }}</button><button class="primary-button" type="submit" :disabled="saving || !claudeReady || anySaving">{{ saving ? t('saving') : t('saveSettings') }}</button></div></footer>
       </form>
     </section>
   </div>
 </template>
 
 <style scoped>
-.settings-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: #05080bcc; }.settings-panel { display: flex; flex-direction: column; width: min(620px, calc(100vw - 40px)); max-height: calc(100vh - 40px); overflow: hidden; padding: 24px; border: 1px solid #35464d; border-radius: 10px; background: #171f25; box-shadow: 0 20px 60px #0009; }.settings-head, .settings-footer, .preflight-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }.settings-head h2 { margin: 5px 0 0; font-size: 20px; font-weight: 600; }.settings-close { border: 0; background: transparent; color: #9aabb0; font-size: 24px; cursor: pointer; }.settings-form { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; margin-top: 22px; overflow: hidden; }.settings-content { display: grid; flex: 1 1 auto; min-height: 0; gap: 14px; overflow-y: auto; padding-right: 4px; }.settings-form label { display: grid; gap: 7px; color: #d7e0e2; font-size: 12px; }.hint { color: #798a91; font-size: 10px; }.settings-form input:not([type=checkbox]) { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid #34434a; border-radius: 5px; background: #10171c; color: #e6eeed; font: inherit; }.settings-form input:focus { outline: 2px solid #75b9a466; border-color: #75b9a4; }.field-help, .check-row small { margin: -4px 0 0; color: #7f9198; font-size: 11px; line-height: 1.45; }.check-row { grid-template-columns: auto 1fr !important; align-items: start; }.check-row input, .risk-row input { accent-color: #75b9a4; }.check-row span { display: grid; gap: 3px; }.risk-row { padding: 9px; border-left: 2px solid #bf9660; background: #73572b1c; grid-template-columns: auto 1fr !important; line-height: 1.4; }.settings-divider { height: 1px; background: #2b383e; }.preflight-block { display: grid; gap: 10px; }.preflight-title { color: #b8c8ca; font-size: 12px; }.secondary-button, .primary-button { border: 1px solid #3c4d53; border-radius: 5px; padding: 7px 10px; color: #b9c8c8; background: transparent; cursor: pointer; font: inherit; font-size: 11px; }.primary-button { border-color: #75b9a4; background: #75b9a41c; color: #c9e8dd; }.secondary-button:hover:not(:disabled), .primary-button:hover:not(:disabled) { background: #2a3d40; }.secondary-button:disabled, .primary-button:disabled { opacity: .5; cursor: not-allowed; }.preview-list { display: grid; grid-template-columns: 145px 1fr; gap: 8px; margin: 0; padding: 11px; border: 1px solid #2c3b42; border-radius: 5px; background: #11181d; font-size: 11px; }.preview-list dt { color: #778a92; }.preview-list dd { margin: 0; color: #d1dedd; overflow-wrap: anywhere; }.preview-list code { color: #d4c28a; }.settings-error { margin: 0; color: #dc9292; font-size: 11px; }.settings-notice { margin: 0; color: #8bc7b0; font-size: 11px; }.settings-footer { flex: 0 0 auto; justify-content: flex-end; margin: 14px -24px -24px; padding: 14px 24px 24px; border-top: 1px solid #2b383e; background: #171f25; }.settings-state { min-height: 120px; display: grid; place-items: center; color: #829198; }
+.settings-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: #05080bcc; }.settings-panel { display: flex; flex-direction: column; width: min(620px, calc(100vw - 40px)); max-height: calc(100vh - 40px); overflow: hidden; padding: 24px; border: 1px solid #35464d; border-radius: 10px; background: #171f25; box-shadow: 0 20px 60px #0009; }.settings-head, .settings-footer, .preflight-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }.settings-head h2 { margin: 5px 0 0; font-size: 20px; font-weight: 600; }.settings-close { border: 0; background: transparent; color: #9aabb0; font-size: 24px; cursor: pointer; }.settings-form { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; margin-top: 22px; overflow: hidden; }.settings-content { display: grid; flex: 1 1 auto; min-height: 0; gap: 14px; overflow-y: auto; padding-right: 4px; }.settings-form label { display: grid; gap: 7px; color: #d7e0e2; font-size: 12px; }.hint { color: #798a91; font-size: 10px; }.settings-form input:not([type=checkbox]) { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid #34434a; border-radius: 5px; background: #10171c; color: #e6eeed; font: inherit; }.settings-form input:focus { outline: 2px solid #75b9a466; border-color: #75b9a4; }.field-help, .check-row small { margin: -4px 0 0; color: #7f9198; font-size: 11px; line-height: 1.45; }.check-row { grid-template-columns: auto 1fr !important; align-items: start; }.check-row input, .risk-row input { accent-color: #75b9a4; }.check-row span { display: grid; gap: 3px; }.risk-row { padding: 9px; border-left: 2px solid #bf9660; background: #73572b1c; grid-template-columns: auto 1fr !important; line-height: 1.4; }.settings-divider { height: 1px; background: #2b383e; }.preflight-block { display: grid; gap: 10px; }.preflight-title { color: #b8c8ca; font-size: 12px; }.secondary-button, .primary-button { border: 1px solid #3c4d53; border-radius: 5px; padding: 7px 10px; color: #b9c8c8; background: transparent; cursor: pointer; font: inherit; font-size: 11px; }.primary-button { border-color: #75b9a4; background: #75b9a41c; color: #c9e8dd; }.secondary-button:hover:not(:disabled), .primary-button:hover:not(:disabled) { background: #2a3d40; }.secondary-button:disabled, .primary-button:disabled { opacity: .5; cursor: not-allowed; }.preview-list { display: grid; grid-template-columns: 145px 1fr; gap: 8px; margin: 0; padding: 11px; border: 1px solid #2c3b42; border-radius: 5px; background: #11181d; font-size: 11px; }.preview-list dt { color: #778a92; }.preview-list dd { margin: 0; color: #d1dedd; overflow-wrap: anywhere; }.preview-list code { color: #d4c28a; }.settings-error { margin: 0; color: #dc9292; font-size: 11px; }.settings-notice { margin: 0; color: #8bc7b0; font-size: 11px; }.settings-footer { flex: 0 0 auto; margin: 14px -24px -24px; padding: 14px 24px 24px; border-top: 1px solid #2b383e; background: #171f25; }.settings-feedback { min-width: 0; text-align: left; }.settings-actions { display: flex; flex: 0 0 auto; gap: 12px; margin-left: auto; }.settings-state { min-height: 120px; display: grid; place-items: center; color: #829198; }
 .language-field select { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid #34434a; border-radius: 5px; background: #10171c; color: #e6eeed; font: inherit; }
 </style>

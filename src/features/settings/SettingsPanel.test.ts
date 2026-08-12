@@ -40,7 +40,7 @@ describe('SettingsPanel scan controls', () => {
     vi.clearAllMocks();
     setLocale('en');
     mocks.getClaudeSettings.mockResolvedValue({ executable_override: null, dangerously_skip_permissions: false });
-    mocks.getScanSettings.mockResolvedValue({ source_root: '/old', effective_root: '/old', scan_interval_seconds: 60, enabled_provider_ids: ['claude'] });
+    mocks.getScanSettings.mockResolvedValue({ source_root: '/old', effective_root: '/old', scan_interval_seconds: 60, enabled_provider_ids: ['claude'], provider_lookback_days: {} });
     mocks.getIndexDiagnostics.mockResolvedValue({ effective_root: '/old', scan_interval_seconds: 60, last_success_at: 1, last_attempt_at: 2, last_outcome: 'committed', indexed_sessions: 1, last_run: null, diagnostic_counts: [{ code: 'malformed_json', count: 2, last_occurred_at: 2, last_run_id: 1 }] });
     mocks.updateClaudeSettings.mockResolvedValue({ executable_override: null, dangerously_skip_permissions: false });
     mocks.updateScanSettings.mockImplementation(async (update) => ({ source_root: '/old', effective_root: '/old', ...update }));
@@ -109,7 +109,7 @@ describe('SettingsPanel scan controls', () => {
     expect(host.querySelector('.settings-form')).not.toBeNull();
     expect(host.querySelector<HTMLInputElement>('input[placeholder="Automatic: claude"]')?.disabled).toBe(false);
     expect(host.textContent).toContain('Scan settings loading');
-    release({ source_root: '/old', effective_root: '/old', scan_interval_seconds: 60, enabled_provider_ids: ['claude'] });
+    release({ source_root: '/old', effective_root: '/old', scan_interval_seconds: 60, enabled_provider_ids: ['claude'], provider_lookback_days: {} });
   });
 
   it('imports only explicitly checked agents', async () => {
@@ -122,12 +122,30 @@ describe('SettingsPanel scan controls', () => {
     expect(mocks.updateScanSettings).toHaveBeenCalledWith({
       scan_interval_seconds: 60,
       enabled_provider_ids: ['claude', 'codex'],
+      provider_lookback_days: {},
+    });
+  });
+
+  it('saves a per-agent recent-days import range', async () => {
+    await settle();
+    host.querySelector<HTMLInputElement>('.agent-option input[value="codex"]')!.click();
+    await nextTick();
+    const range = host.querySelector<HTMLSelectElement>('.agent-lookback[data-provider-id="codex"]')!;
+    range.value = '30';
+    range.dispatchEvent(new Event('change', { bubbles: true }));
+    host.querySelector<HTMLButtonElement>('.scan-section .secondary-button')!.click();
+    await settle();
+
+    expect(mocks.updateScanSettings).toHaveBeenCalledWith({
+      scan_interval_seconds: 60,
+      enabled_provider_ids: ['claude', 'codex'],
+      provider_lookback_days: { codex: 30 },
     });
   });
 
   it('saves the provider selection from the main settings button and reloads it', async () => {
     let persistedProviders = ['claude'];
-    mocks.getScanSettings.mockImplementation(async () => ({ source_root: '/old', effective_root: '/old', scan_interval_seconds: 60, enabled_provider_ids: [...persistedProviders] }));
+    mocks.getScanSettings.mockImplementation(async () => ({ source_root: '/old', effective_root: '/old', scan_interval_seconds: 60, enabled_provider_ids: [...persistedProviders], provider_lookback_days: {} }));
     mocks.updateScanSettings.mockImplementation(async (update) => {
       persistedProviders = [...update.enabled_provider_ids];
       return { source_root: '/old', effective_root: '/old', ...update };
@@ -141,6 +159,7 @@ describe('SettingsPanel scan controls', () => {
     expect(mocks.updateScanSettings).toHaveBeenCalledWith({
       scan_interval_seconds: 60,
       enabled_provider_ids: ['claude', 'opencode'],
+      provider_lookback_days: {},
     });
     app.unmount();
     app = createApp(SettingsPanel, { session: null, providers }); app.mount(host);
@@ -148,9 +167,21 @@ describe('SettingsPanel scan controls', () => {
     expect(host.querySelector<HTMLInputElement>('.agent-option input[value="opencode"]')?.checked).toBe(true);
   });
 
+  it('shows provider save errors beside the footer actions', async () => {
+    mocks.updateScanSettings.mockRejectedValue(new Error('lifecycle busy'));
+    await settle();
+    host.querySelector<HTMLInputElement>('.agent-option input[value="codex"]')!.click();
+    host.querySelector<HTMLButtonElement>('.settings-footer .primary-button')!.click();
+    await settle();
+
+    const footer = host.querySelector<HTMLElement>('.settings-footer')!;
+    expect(footer.querySelector('[role="alert"]')?.textContent).toContain('lifecycle busy');
+    expect(footer.querySelectorAll('.settings-actions button')).toHaveLength(2);
+  });
+
   it('reports committed partial root activation as updated but partial', async () => {
     mocks.activateClaudeSourceRoot.mockResolvedValue({
-      settings: { source_root: '/new', effective_root: '/new', scan_interval_seconds: 60, enabled_provider_ids: ['claude'] },
+      settings: { source_root: '/new', effective_root: '/new', scan_interval_seconds: 60, enabled_provider_ids: ['claude'], provider_lookback_days: {} },
       scan: { root: '/new', trigger: 'manual', outcome: 'committed', committed: true, sessions: 1, diagnostics: 1, partial: true, removed_sessions: 0, new_files: 1, changed_files: 0, unchanged_files: 0, removed_files: 0, partial_sessions: 1 },
     });
     await settle();

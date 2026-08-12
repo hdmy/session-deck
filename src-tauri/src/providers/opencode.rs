@@ -43,6 +43,7 @@ pub struct OpenCodeScan {
     pub sessions: Vec<ParsedSession>,
     pub diagnostics: Vec<String>,
     pub complete: bool,
+    pub source: SourceFingerprint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,14 +111,18 @@ impl OpenCodeStore {
 
     pub fn discover(&self) -> crate::domain::Result<Vec<OpenCodeSession>> {
         let connection = self.connection()?;
-        self.discover_with_connection(&connection)
+        self.discover_with_connection(&connection, None)
     }
 
     pub fn scan_all(&self) -> crate::domain::Result<OpenCodeScan> {
+        self.scan_since(None)
+    }
+
+    pub fn scan_since(&self, modified_since: Option<i64>) -> crate::domain::Result<OpenCodeScan> {
         let source = self.source_state()?;
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
-        let sessions = self.discover_with_connection(&tx)?;
+        let sessions = self.discover_with_connection(&tx, modified_since)?;
         let mut parsed = Vec::with_capacity(sessions.len());
         let mut diagnostics = Vec::new();
         let mut complete = true;
@@ -142,6 +147,7 @@ impl OpenCodeStore {
             sessions: parsed,
             diagnostics,
             complete,
+            source: source.fingerprint,
         })
     }
 
@@ -152,6 +158,7 @@ impl OpenCodeStore {
     fn discover_with_connection(
         &self,
         connection: &Connection,
+        modified_since: Option<i64>,
     ) -> crate::domain::Result<Vec<OpenCodeSession>> {
         let workspace = if has_session_column(connection, "workspace_id")? {
             "workspace_id"
@@ -160,10 +167,13 @@ impl OpenCodeStore {
         };
         let query = format!(
             "SELECT id, project_id, parent_id, directory, title, time_created, time_updated, {workspace}
-             FROM session WHERE parent_id IS NULL ORDER BY time_updated DESC, time_created DESC, id"
+             FROM session
+             WHERE parent_id IS NULL
+               AND (?1 IS NULL OR COALESCE(time_updated, time_created, 0) >= ?1)
+             ORDER BY time_updated DESC, time_created DESC, id"
         );
         let mut statement = connection.prepare(&query)?;
-        let rows = statement.query_map([], decode_session)?;
+        let rows = statement.query_map([modified_since], decode_session)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(AppError::from)
     }
@@ -822,6 +832,39 @@ mod tests {
 
         assert_eq!(scan.sessions.len(), 2);
         HASH_FILE_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+    }
+
+    #[test]
+    fn scan_since_parses_only_recent_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("opencode.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT,
+                    directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER,
+                    workspace_id TEXT
+                );
+                CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
+                INSERT INTO session VALUES
+                    ('old', 'project', NULL, '/tmp/project', 'Old', 1, 2, NULL),
+                    ('recent', 'project', NULL, '/tmp/project', 'Recent', 3, 4, NULL);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let scan = OpenCodeStore::open(&path)
+            .unwrap()
+            .scan_since(Some(3))
+            .unwrap();
+
+        assert_eq!(scan.sessions.len(), 1);
+        assert_eq!(
+            scan.sessions[0].summary.native_session_id.as_deref(),
+            Some("recent")
+        );
     }
 
     #[test]

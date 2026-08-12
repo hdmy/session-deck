@@ -8,7 +8,7 @@ use crate::{
         claude::{ClaudeProvider, PROVIDER_ID},
         claude_live::ClaudeLiveTail,
         codex::CodexProvider,
-        gemini::GeminiProvider,
+        gemini::{self, GeminiProvider},
         opencode::{OpenCodeStore, PROVIDER_ID as OPENCODE_PROVIDER_ID},
         ProviderDescriptor, ProviderRegistry, SessionProvider,
     },
@@ -31,6 +31,8 @@ const DEFAULT_COLS: u16 = 80;
 const MAX_WRITE_BYTES: usize = 64 * 1024;
 const MAX_POLL_EVENTS: usize = 64;
 const MAX_POLL_BYTES: usize = 64 * 1024;
+const MILLIS_PER_DAY: i64 = 86_400_000;
+const ALLOWED_PROVIDER_LOOKBACK_DAYS: [i64; 5] = [7, 30, 90, 180, 365];
 type ScanWork = (
     Vec<crate::domain::ParsedSession>,
     Vec<String>,
@@ -44,16 +46,18 @@ type ScanWork = (
 fn prepare_scan(
     root: &Path,
     manifest: &HashMap<PathBuf, scanner::SourceFingerprint>,
+    modified_since: Option<i64>,
 ) -> Result<ScanWork> {
-    prepare_provider_scan(&ClaudeProvider, root, manifest)
+    prepare_provider_scan(&ClaudeProvider, root, manifest, modified_since)
 }
 
 fn prepare_provider_scan(
     provider: &dyn SessionProvider,
     root: &Path,
     manifest: &HashMap<PathBuf, scanner::SourceFingerprint>,
+    modified_since: Option<i64>,
 ) -> Result<ScanWork> {
-    let plan = scanner::plan_provider_scan(provider, root, manifest)?;
+    let plan = scanner::plan_provider_scan(provider, root, manifest, modified_since)?;
     let mut sessions = Vec::new();
     let mut diagnostics = plan.diagnostics;
     let mut complete = plan.complete;
@@ -155,6 +159,7 @@ fn prepare_file_provider(
     provider: &dyn SessionProvider,
     root: &Path,
     manifest: Result<HashMap<PathBuf, scanner::SourceFingerprint>>,
+    modified_since: Option<i64>,
 ) -> PreparedFileProvider {
     let provider_id = provider.id();
     let unavailable = |summary| PreparedFileProvider {
@@ -193,7 +198,7 @@ fn prepare_file_provider(
         }
     };
     let (sessions, diagnostics, complete, new_files, changed_files, unchanged_files, discovered) =
-        match prepare_provider_scan(provider, root, &manifest) {
+        match prepare_provider_scan(provider, root, &manifest, modified_since) {
             Ok(value) => value,
             Err(_) => {
                 return unavailable(ProviderScanSummary {
@@ -235,7 +240,18 @@ fn reconcile_file_provider(
     connection: &mut Connection,
     mut prepared: PreparedFileProvider,
 ) -> ProviderScanSummary {
-    if let Some((sessions, discovered)) = prepared.reconciliation.take() {
+    if let Some((mut sessions, discovered)) = prepared.reconciliation.take() {
+        if prepared.provider_id == gemini::PROVIDER_ID {
+            let Ok(known_paths) = storage::known_project_paths(connection) else {
+                prepared.summary.partial = true;
+                prepared
+                    .summary
+                    .diagnostics
+                    .push("gemini:project_paths_unreadable".into());
+                return prepared.summary;
+            };
+            gemini::resolve_legacy_project_paths(&mut sessions, &known_paths);
+        }
         match indexer::reconcile_incremental(
             connection,
             prepared.provider_id,
@@ -265,7 +281,10 @@ fn scan_file_provider(
     root: &Path,
 ) -> ProviderScanSummary {
     let manifest = storage::source_manifest(connection, provider.id());
-    reconcile_file_provider(connection, prepare_file_provider(provider, root, manifest))
+    reconcile_file_provider(
+        connection,
+        prepare_file_provider(provider, root, manifest, None),
+    )
 }
 
 struct PreparedOpenCodeProvider {
@@ -283,6 +302,7 @@ struct OpenCodeIndexSnapshot {
 fn prepare_opencode_provider(
     path: &Path,
     indexed: &OpenCodeIndexSnapshot,
+    modified_since: Option<i64>,
 ) -> PreparedOpenCodeProvider {
     if !path.is_file() {
         return PreparedOpenCodeProvider {
@@ -303,40 +323,42 @@ fn prepare_opencode_provider(
             }
         }
     };
-    let fingerprint = match store.source_fingerprint() {
-        Ok(fingerprint) => fingerprint,
-        Err(_) => {
+    if modified_since.is_none() {
+        let fingerprint = match store.source_fingerprint() {
+            Ok(fingerprint) => fingerprint,
+            Err(_) => {
+                return PreparedOpenCodeProvider {
+                    summary: ProviderScanSummary {
+                        diagnostics: vec![format!(
+                            "{OPENCODE_PROVIDER_ID}:database_fingerprint_failed"
+                        )],
+                        partial: true,
+                        ..Default::default()
+                    },
+                    sessions: None,
+                }
+            }
+        };
+        if indexed.source.as_ref().is_some_and(|source| {
+            source.path == fingerprint.path
+                && source.size == fingerprint.size
+                && source.mtime == fingerprint.mtime
+                && source.hash == fingerprint.hash
+        }) {
             return PreparedOpenCodeProvider {
                 summary: ProviderScanSummary {
-                    diagnostics: vec![format!(
-                        "{OPENCODE_PROVIDER_ID}:database_fingerprint_failed"
-                    )],
-                    partial: true,
+                    sessions: indexed.sessions,
+                    committed: true,
+                    partial: indexed.partial_sessions > 0,
+                    unchanged_files: 1,
+                    partial_sessions: indexed.partial_sessions,
                     ..Default::default()
                 },
                 sessions: None,
-            }
+            };
         }
-    };
-    if indexed.source.as_ref().is_some_and(|source| {
-        source.path == fingerprint.path
-            && source.size == fingerprint.size
-            && source.mtime == fingerprint.mtime
-            && source.hash == fingerprint.hash
-    }) {
-        return PreparedOpenCodeProvider {
-            summary: ProviderScanSummary {
-                sessions: indexed.sessions,
-                committed: true,
-                partial: indexed.partial_sessions > 0,
-                unchanged_files: 1,
-                partial_sessions: indexed.partial_sessions,
-                ..Default::default()
-            },
-            sessions: None,
-        };
     }
-    let result = match store.scan_all() {
+    let result = match store.scan_since(modified_since) {
         Ok(result) => result,
         Err(_) => {
             return PreparedOpenCodeProvider {
@@ -350,6 +372,12 @@ fn prepare_opencode_provider(
         }
     };
     let complete = result.complete;
+    let source_unchanged = indexed.source.as_ref().is_some_and(|source| {
+        source.path == result.source.path
+            && source.size == result.source.size
+            && source.mtime == result.source.mtime
+            && source.hash == result.source.hash
+    });
     let partial_sessions = result
         .sessions
         .iter()
@@ -364,7 +392,8 @@ fn prepare_opencode_provider(
             .collect(),
         partial: !result.complete || partial_sessions > 0,
         new_files: usize::from(indexed.source.is_none()),
-        changed_files: usize::from(indexed.source.is_some()),
+        changed_files: usize::from(indexed.source.is_some() && !source_unchanged),
+        unchanged_files: usize::from(source_unchanged),
         partial_sessions,
         ..Default::default()
     };
@@ -446,6 +475,35 @@ fn validate_enabled_provider_ids(provider_ids: &[String]) -> Result<Vec<String>>
         .collect())
 }
 
+fn validate_provider_lookback_days(
+    values: &BTreeMap<String, i64>,
+) -> Result<BTreeMap<String, i64>> {
+    let registry = ProviderRegistry::builtin();
+    for (provider_id, days) in values {
+        if registry.get(provider_id).is_none() {
+            return Err(AppError::Message(format!(
+                "unknown provider lookback: {provider_id}"
+            )));
+        }
+        if !ALLOWED_PROVIDER_LOOKBACK_DAYS.contains(days) {
+            return Err(AppError::Message(format!(
+                "invalid provider lookback days: {days}"
+            )));
+        }
+    }
+    Ok(values.clone())
+}
+
+fn provider_modified_since(
+    values: &BTreeMap<String, i64>,
+    provider_id: &str,
+    now: i64,
+) -> Option<i64> {
+    values
+        .get(provider_id)
+        .map(|days| now.saturating_sub(days.saturating_mul(MILLIS_PER_DAY)))
+}
+
 #[derive(Debug, Default)]
 pub struct LifecycleState {
     pub scanning: bool,
@@ -485,6 +543,8 @@ impl AppState {
         let mut scan_settings = storage::claude_scan_settings(&db)?;
         scan_settings.enabled_provider_ids =
             validate_enabled_provider_ids(&scan_settings.enabled_provider_ids)?;
+        scan_settings.provider_lookback_days =
+            validate_provider_lookback_days(&scan_settings.provider_lookback_days)?;
         storage::update_claude_scan_settings(&mut db, &scan_settings)?;
         let last_scan_at = storage::last_success_at(&db)?;
         let configured_root = scan_settings
@@ -582,14 +642,16 @@ pub async fn scan(state: State<'_, AppState>, args: Option<ScanArgs>) -> Result<
     let codex_root = CodexProvider.default_root();
     let gemini_root = GeminiProvider.default_root();
     let opencode_path = OpenCodeStore::default_path();
-    let (enabled_provider_ids, file_provider_inputs, opencode_index) = {
+    let (enabled_provider_ids, file_provider_inputs, opencode_index, opencode_modified_since) = {
         let db = state
             .db
             .lock()
             .map_err(|_| AppError::Message("database lock poisoned".into()))?;
-        let enabled_provider_ids = validate_enabled_provider_ids(
-            &storage::claude_scan_settings(&db)?.enabled_provider_ids,
-        )?;
+        let scan_settings = storage::claude_scan_settings(&db)?;
+        let enabled_provider_ids =
+            validate_enabled_provider_ids(&scan_settings.enabled_provider_ids)?;
+        let provider_lookback_days =
+            validate_provider_lookback_days(&scan_settings.provider_lookback_days)?;
         let file_provider_inputs = ProviderRegistry::builtin_session_providers()
             .into_iter()
             .filter(|provider| enabled_provider_ids.iter().any(|id| id == provider.id()))
@@ -604,6 +666,11 @@ pub async fn scan(state: State<'_, AppState>, args: Option<ScanArgs>) -> Result<
                     provider,
                     provider_root.clone(),
                     storage::source_manifest(&db, provider.id()),
+                    provider_modified_since(
+                        &provider_lookback_days,
+                        provider.id(),
+                        scan_started_at,
+                    ),
                 ))
             })
             .collect::<Vec<_>>();
@@ -622,18 +689,30 @@ pub async fn scan(state: State<'_, AppState>, args: Option<ScanArgs>) -> Result<
         } else {
             OpenCodeIndexSnapshot::default()
         };
-        (enabled_provider_ids, file_provider_inputs, opencode_index)
+        let opencode_modified_since = provider_modified_since(
+            &provider_lookback_days,
+            OPENCODE_PROVIDER_ID,
+            scan_started_at,
+        );
+        (
+            enabled_provider_ids,
+            file_provider_inputs,
+            opencode_index,
+            opencode_modified_since,
+        )
     };
     let prepared_file_providers = file_provider_inputs
         .into_iter()
-        .map(|(provider, provider_root, manifest)| {
-            prepare_file_provider(provider, &provider_root, manifest)
+        .map(|(provider, provider_root, manifest, modified_since)| {
+            prepare_file_provider(provider, &provider_root, manifest, modified_since)
         })
         .collect();
     let prepared_opencode = enabled_provider_ids
         .iter()
         .any(|id| id == OPENCODE_PROVIDER_ID)
-        .then(|| prepare_opencode_provider(&opencode_path, &opencode_index));
+        .then(|| {
+            prepare_opencode_provider(&opencode_path, &opencode_index, opencode_modified_since)
+        });
     let summaries = {
         let mut db = state
             .db
@@ -1061,6 +1140,7 @@ pub struct ScanSettingsDto {
     pub effective_root: String,
     pub scan_interval_seconds: i64,
     pub enabled_provider_ids: Vec<String>,
+    pub provider_lookback_days: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1080,6 +1160,7 @@ pub fn get_scan_settings(state: State<'_, AppState>) -> Result<ScanSettingsDto> 
             .unwrap_or_else(|| scanner::default_root().display().to_string()),
         scan_interval_seconds: settings.scan_interval_seconds,
         enabled_provider_ids: settings.enabled_provider_ids,
+        provider_lookback_days: settings.provider_lookback_days,
     })
 }
 
@@ -1088,6 +1169,7 @@ pub fn get_scan_settings(state: State<'_, AppState>) -> Result<ScanSettingsDto> 
 pub struct ScanSettingsUpdate {
     pub scan_interval_seconds: i64,
     pub enabled_provider_ids: Vec<String>,
+    pub provider_lookback_days: BTreeMap<String, i64>,
 }
 
 fn validate_scan_interval(seconds: i64) -> Result<()> {
@@ -1107,6 +1189,7 @@ pub fn update_scan_settings(
 ) -> Result<ScanSettingsDto> {
     validate_scan_interval(update.scan_interval_seconds)?;
     let enabled_provider_ids = validate_enabled_provider_ids(&update.enabled_provider_ids)?;
+    let provider_lookback_days = validate_provider_lookback_days(&update.provider_lookback_days)?;
     let lifecycle = state.lifecycle.lock().expect("lifecycle lock");
     if lifecycle.scanning || lifecycle.active_terminal.is_some() {
         return Err(AppError::Message("lifecycle busy".into()));
@@ -1115,6 +1198,7 @@ pub fn update_scan_settings(
     let mut settings = storage::claude_scan_settings(&db)?;
     settings.scan_interval_seconds = update.scan_interval_seconds;
     settings.enabled_provider_ids = enabled_provider_ids;
+    settings.provider_lookback_days = provider_lookback_days;
     storage::update_claude_scan_settings(&mut db, &settings)?;
     drop(lifecycle);
     Ok(ScanSettingsDto {
@@ -1125,6 +1209,7 @@ pub fn update_scan_settings(
             .unwrap_or_else(|| scanner::default_root().display().to_string()),
         scan_interval_seconds: settings.scan_interval_seconds,
         enabled_provider_ids: settings.enabled_provider_ids,
+        provider_lookback_days: settings.provider_lookback_days,
     })
 }
 
@@ -1195,9 +1280,14 @@ pub fn activate_claude_source_root(
             "replacing active index requires acknowledgement".into(),
         ));
     }
+    let modified_since = provider_modified_since(
+        &validate_provider_lookback_days(&settings.provider_lookback_days)?,
+        PROVIDER_ID,
+        scan_started_at,
+    );
     drop(db);
     let manifest = storage::source_manifest(&state.db.lock().expect("db lock"), PROVIDER_ID)?;
-    let prepared = match prepare_scan(&canonical, &manifest) {
+    let prepared = match prepare_scan(&canonical, &manifest, modified_since) {
         Ok(prepared) => prepared,
         Err(error) => {
             let db = state.db.lock().expect("db lock");
@@ -1256,6 +1346,7 @@ pub fn activate_claude_source_root(
                     .unwrap_or_else(|| scanner::default_root().display().to_string()),
                 scan_interval_seconds: current.scan_interval_seconds,
                 enabled_provider_ids: current.enabled_provider_ids,
+                provider_lookback_days: current.provider_lookback_days,
             },
             scan: ScanReport {
                 root: canonical.display().to_string(),
@@ -1338,6 +1429,7 @@ pub fn activate_claude_source_root(
                 .unwrap_or_else(|| scanner::default_root().display().to_string()),
             scan_interval_seconds: current.scan_interval_seconds,
             enabled_provider_ids: current.enabled_provider_ids,
+            provider_lookback_days: current.provider_lookback_days,
         },
         scan,
     })
@@ -2263,6 +2355,7 @@ mod tests {
                     provider,
                     root,
                     storage::source_manifest(connection, provider.id()),
+                    None,
                 ))
             })
             .collect()
@@ -2374,7 +2467,7 @@ mod tests {
         };
 
         let (sessions, diagnostics, complete, ..) =
-            prepare_provider_scan(&provider, root.path(), &HashMap::new()).unwrap();
+            prepare_provider_scan(&provider, root.path(), &HashMap::new(), None).unwrap();
 
         assert_eq!(sessions.len(), 1);
         assert!(!complete);
@@ -2474,6 +2567,7 @@ mod tests {
             Some(prepare_opencode_provider(
                 &missing_opencode,
                 &OpenCodeIndexSnapshot::default(),
+                None,
             )),
         );
         assert_eq!(
@@ -2516,7 +2610,8 @@ mod tests {
 
         let database = tempfile::tempdir().unwrap();
         let mut index = storage::open(&database.path().join("index.db")).unwrap();
-        let first = prepare_opencode_provider(source.path(), &OpenCodeIndexSnapshot::default());
+        let first =
+            prepare_opencode_provider(source.path(), &OpenCodeIndexSnapshot::default(), None);
         assert!(reconcile_opencode_provider(&mut index, first).committed);
         let mut manifest = storage::source_manifest(&index, OPENCODE_PROVIDER_ID).unwrap();
         let (sessions, partial_sessions) =
@@ -2527,7 +2622,7 @@ mod tests {
             partial_sessions,
         };
 
-        let unchanged = prepare_opencode_provider(source.path(), &snapshot);
+        let unchanged = prepare_opencode_provider(source.path(), &snapshot, None);
 
         assert!(unchanged.summary.committed);
         assert_eq!(unchanged.summary.sessions, 1);
@@ -2645,6 +2740,18 @@ mod tests {
         );
         assert!(validate_enabled_provider_ids(&["claude".into(), "claude".into()]).is_err());
         assert!(validate_enabled_provider_ids(&["unknown".into()]).is_err());
+    }
+
+    #[test]
+    fn provider_lookbacks_accept_only_known_agents_and_dropdown_values() {
+        let values = BTreeMap::from([("gemini".to_owned(), 30)]);
+        assert_eq!(validate_provider_lookback_days(&values).unwrap(), values);
+        assert!(
+            validate_provider_lookback_days(&BTreeMap::from([("unknown".to_owned(), 30)])).is_err()
+        );
+        assert!(
+            validate_provider_lookback_days(&BTreeMap::from([("gemini".to_owned(), 31)])).is_err()
+        );
     }
 
     #[test]

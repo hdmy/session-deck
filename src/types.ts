@@ -275,11 +275,13 @@ export interface ScanSettings {
   effective_root: string;
   scan_interval_seconds: number;
   enabled_provider_ids: ProviderId[];
+  provider_lookback_days: Partial<Record<ProviderId, number>>;
 }
 
 export interface ScanSettingsUpdate {
   scan_interval_seconds: number;
   enabled_provider_ids: ProviderId[];
+  provider_lookback_days: Partial<Record<ProviderId, number>>;
 }
 
 export interface ScanRun {

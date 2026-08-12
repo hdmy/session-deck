@@ -112,24 +112,49 @@ pub fn plan_provider_scan(
     provider: &dyn SessionProvider,
     root: &Path,
     manifest: &HashMap<PathBuf, SourceFingerprint>,
+    modified_since: Option<i64>,
 ) -> Result<ScanPlan> {
     let discovery = provider.discover(root)?;
-    let discovered_paths = discovery.paths.iter().cloned().collect::<HashSet<_>>();
     let mut plan = ScanPlan {
         complete: discovery.complete,
         diagnostics: discovery.diagnostics,
         ..Default::default()
     };
+    let mut eligible_paths = Vec::new();
+    let mut excluded_paths = HashSet::new();
+    for path in discovery.paths {
+        let in_range = modified_since.is_none_or(|cutoff| {
+            std::fs::symlink_metadata(&path).map_or(true, |metadata| {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return true;
+                }
+                metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .is_none_or(|duration| duration.as_millis() as i64 >= cutoff)
+            })
+        });
+        if in_range {
+            eligible_paths.push(path);
+        } else {
+            excluded_paths.insert(path);
+        }
+    }
+    let discovered_paths = eligible_paths.iter().cloned().collect::<HashSet<_>>();
     for old_path in manifest
         .keys()
         .filter(|path| !discovered_paths.contains(*path))
     {
+        if excluded_paths.contains(old_path) {
+            continue;
+        }
         if omitted_source_is_unsafe(old_path) {
             plan.complete = false;
             plan.diagnostics.push("source_entry_unsafe".into());
         }
     }
-    for path in discovery.paths {
+    for path in eligible_paths {
         let fp = match fingerprint(&path) {
             Ok(fp) => fp,
             Err(_) => {
@@ -344,12 +369,39 @@ mod tests {
             source: source.clone(),
         };
         let manifest = HashMap::from([(source, original)]);
-        let plan = plan_provider_scan(&provider, root.path(), &manifest).unwrap();
+        let plan = plan_provider_scan(&provider, root.path(), &manifest, None).unwrap();
 
         assert_eq!(plan.changed_files, 1);
         assert_eq!(plan.new_files, 0);
         assert_eq!(plan.unchanged, 0);
         assert_eq!(plan.parse.len(), 1);
+    }
+
+    #[test]
+    fn lookback_excludes_old_sources_from_scan_plan() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("session.jsonl");
+        std::fs::write(&source, b"old").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap();
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)),
+        )
+        .unwrap();
+        let original = fingerprint(&source).unwrap();
+        let provider = StaticProvider {
+            source: source.clone(),
+        };
+        let manifest = HashMap::from([(source, original)]);
+
+        let plan = plan_provider_scan(&provider, root.path(), &manifest, Some(2_000)).unwrap();
+
+        assert!(plan.complete);
+        assert!(plan.discovered.is_empty());
+        assert!(plan.parse.is_empty());
     }
 
     #[test]
@@ -364,7 +416,7 @@ mod tests {
         std::fs::remove_file(&source).unwrap();
         std::fs::create_dir(&source).unwrap();
 
-        let plan = plan_provider_scan(&ClaudeProvider, root.path(), &manifest).unwrap();
+        let plan = plan_provider_scan(&ClaudeProvider, root.path(), &manifest, None).unwrap();
 
         assert!(!plan.complete);
         assert!(plan
@@ -390,7 +442,7 @@ mod tests {
         std::fs::remove_dir_all(&project).unwrap();
         symlink(&target, &project).unwrap();
 
-        let plan = plan_provider_scan(&ClaudeProvider, root.path(), &manifest).unwrap();
+        let plan = plan_provider_scan(&ClaudeProvider, root.path(), &manifest, None).unwrap();
 
         assert!(!plan.complete);
         assert!(plan

@@ -107,7 +107,7 @@ describe('useSessionBrowser', () => {
     }));
     apiMock.setSessionPinned.mockImplementation(async (_id: string, pinned: boolean) => ({ ...session, pinned }));
     apiMock.setProjectAlias.mockResolvedValue([makeProject([session])]);
-    apiMock.activateClaudeSourceRoot.mockResolvedValue({ settings: { source_root: '/tmp', effective_root: '/tmp', scan_interval_seconds: 0, enabled_provider_ids: ['claude'] }, scan: makeReport() });
+    apiMock.activateClaudeSourceRoot.mockResolvedValue({ settings: { source_root: '/tmp', effective_root: '/tmp', scan_interval_seconds: 0, enabled_provider_ids: ['claude'], provider_lookback_days: {} }, scan: makeReport() });
 
     scope = effectScope();
     scope.run(() => {
@@ -326,7 +326,7 @@ describe('useSessionBrowser', () => {
     const activation = browser.activateSourceRoot('/new-root', true);
     expect(apiMock.activateClaudeSourceRoot).not.toHaveBeenCalled();
     apiMock.activateClaudeSourceRoot.mockResolvedValueOnce({
-      settings: { source_root: '/new-root', effective_root: '/new-root', scan_interval_seconds: 0, enabled_provider_ids: ['claude'] },
+      settings: { source_root: '/new-root', effective_root: '/new-root', scan_interval_seconds: 0, enabled_provider_ids: ['claude'], provider_lookback_days: {} },
       scan: makeReport({ root: '/new-root', partial: true, partial_sessions: 1 }),
     });
     releaseScan(makeReport({ new_files: 1 }));
@@ -340,7 +340,7 @@ describe('useSessionBrowser', () => {
 
   it('keeps later scans behind an in-flight root activation', async () => {
     await browser.refresh();
-    let releaseActivation!: (value: { settings: { source_root: string; effective_root: string; scan_interval_seconds: number; enabled_provider_ids: ['claude'] }; scan: ScanReport }) => void;
+    let releaseActivation!: (value: { settings: { source_root: string; effective_root: string; scan_interval_seconds: number; enabled_provider_ids: ['claude']; provider_lookback_days: {} }; scan: ScanReport }) => void;
     apiMock.activateClaudeSourceRoot.mockReturnValueOnce(new Promise((resolve) => { releaseActivation = resolve; }));
     const activation = browser.activateSourceRoot('/new-root', true);
     await settle();
@@ -349,7 +349,7 @@ describe('useSessionBrowser', () => {
     await settle();
     expect(apiMock.scan).toHaveBeenCalledTimes(1);
     releaseActivation({
-      settings: { source_root: '/new-root', effective_root: '/new-root', scan_interval_seconds: 0, enabled_provider_ids: ['claude'] },
+      settings: { source_root: '/new-root', effective_root: '/new-root', scan_interval_seconds: 0, enabled_provider_ids: ['claude'], provider_lookback_days: {} },
       scan: makeReport({ root: '/new-root', partial: true, partial_sessions: 1 }),
     });
     await activation;
@@ -361,7 +361,7 @@ describe('useSessionBrowser', () => {
 
   it('lets a scheduled commit created after activation return win', async () => {
     await browser.refresh();
-    let releaseActivation!: (value: { settings: { source_root: string; effective_root: string; scan_interval_seconds: number; enabled_provider_ids: ['claude'] }; scan: ScanReport }) => void;
+    let releaseActivation!: (value: { settings: { source_root: string; effective_root: string; scan_interval_seconds: number; enabled_provider_ids: ['claude']; provider_lookback_days: {} }; scan: ScanReport }) => void;
     apiMock.activateClaudeSourceRoot.mockReturnValueOnce(new Promise((resolve) => { releaseActivation = resolve; }));
     const activation = browser.activateSourceRoot('/new-root', true);
     await settle();
@@ -370,7 +370,7 @@ describe('useSessionBrowser', () => {
     await settle();
     expect(apiMock.scan).toHaveBeenCalledTimes(1);
     apiMock.projects.mockResolvedValue([makeProject([makeSession('scheduled', { title: 'Scheduled' })])]);
-    releaseActivation({ settings: { source_root: '/new-root', effective_root: '/new-root', scan_interval_seconds: 0, enabled_provider_ids: ['claude'] }, scan: makeReport({ root: '/new-root', partial: true, partial_sessions: 1 }) });
+    releaseActivation({ settings: { source_root: '/new-root', effective_root: '/new-root', scan_interval_seconds: 0, enabled_provider_ids: ['claude'], provider_lookback_days: {} }, scan: makeReport({ root: '/new-root', partial: true, partial_sessions: 1 }) });
     await activation;
     expect((await scheduled).status).toBe('success');
     expect(browser.lastScanReport.value?.trigger).toBe('scheduled');
@@ -379,13 +379,13 @@ describe('useSessionBrowser', () => {
 
   it('reserves an idle activation lease before a near-synchronous refresh', async () => {
     await browser.refresh();
-    let releaseActivation!: (value: { settings: { source_root: string; effective_root: string; scan_interval_seconds: number; enabled_provider_ids: ['claude'] }; scan: ScanReport }) => void;
+    let releaseActivation!: (value: { settings: { source_root: string; effective_root: string; scan_interval_seconds: number; enabled_provider_ids: ['claude']; provider_lookback_days: {} }; scan: ScanReport }) => void;
     apiMock.activateClaudeSourceRoot.mockReturnValueOnce(new Promise((resolve) => { releaseActivation = resolve; }));
     const activation = browser.activateSourceRoot('/new-root', true);
     const refresh = await browser.refresh('manual');
     expect(refresh).toEqual({ status: 'skipped', reason: 'scanning' });
     expect(apiMock.scan).toHaveBeenCalledTimes(1);
-    releaseActivation({ settings: { source_root: '/new-root', effective_root: '/new-root', scan_interval_seconds: 0, enabled_provider_ids: ['claude'] }, scan: makeReport({ root: '/new-root' }) });
+    releaseActivation({ settings: { source_root: '/new-root', effective_root: '/new-root', scan_interval_seconds: 0, enabled_provider_ids: ['claude'], provider_lookback_days: {} }, scan: makeReport({ root: '/new-root' }) });
     await activation;
     expect(browser.scanning.value).toBe(false);
   });
