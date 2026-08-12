@@ -110,7 +110,7 @@ fn visit_jsonl(dir: &Path, out: &mut SourceDiscovery) -> std::io::Result<()> {
 
 fn is_subagent_rollout(path: &Path) -> std::io::Result<bool> {
     let file = File::open(path)?;
-    for (line, raw) in BufReader::new(file).lines().enumerate() {
+    for raw in BufReader::new(file).lines() {
         let raw = match raw {
             Ok(value) => value,
             Err(_) => continue,
@@ -123,24 +123,49 @@ fn is_subagent_rollout(path: &Path) -> std::io::Result<bool> {
             continue;
         }
         let payload = value.get("payload").unwrap_or(&value);
-        if let Some(role) = payload.get("agent_role").and_then(Value::as_str) {
-            return Ok(role != "main");
-        }
-        // A fork without an explicit role is still a child rollout.  This is
-        // metadata-only filtering; transcript content is never inspected.
-        if payload
+        return Ok(is_subagent_metadata(payload));
+    }
+    Ok(false)
+}
+
+fn is_subagent_metadata(payload: &Value) -> bool {
+    payload
+        .get("agent_role")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role != "main")
+        || payload
             .get("forked_from_id")
             .and_then(Value::as_str)
             .is_some()
+        || payload
+            .get("source")
+            .and_then(|source| source.get("subagent"))
+            .is_some()
+}
+
+fn uses_canonical_event_messages(path: &Path) -> std::io::Result<bool> {
+    for raw in BufReader::new(File::open(path)?).lines() {
+        let Ok(raw) = raw else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) == Some("event_msg")
+            && matches!(
+                value
+                    .get("payload")
+                    .and_then(|payload| payload.get("type"))
+                    .and_then(Value::as_str),
+                Some("user_message" | "agent_message" | "agent_reasoning")
+            )
         {
             return Ok(true);
         }
-        let _ = line;
     }
     Ok(false)
 }
 
 pub fn parse_session(path: &Path) -> std::io::Result<ParsedSession> {
+    let canonical_event_messages = uses_canonical_event_messages(path)?;
     let initial = fs::metadata(path)?;
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
@@ -229,16 +254,11 @@ pub fn parse_session(path: &Path) -> std::io::Result<ParsedSession> {
                 .and_then(Value::as_str)
                 .or_else(|| payload.get("branch").and_then(Value::as_str))
                 .map(str::to_owned);
-            is_subagent = payload
-                .get("agent_role")
-                .and_then(Value::as_str)
-                .is_some_and(|v| v != "main")
-                || payload
-                    .get("forked_from_id")
-                    .and_then(Value::as_str)
-                    .is_some();
+            is_subagent = is_subagent_metadata(payload);
             if let Some(model) = payload.get("model").and_then(Value::as_str) {
-                models.push(model.to_owned());
+                if !models.iter().any(|value| value == model) {
+                    models.push(model.to_owned());
+                }
             }
             sequence += 1;
             continue;
@@ -247,11 +267,109 @@ pub fn parse_session(path: &Path) -> std::io::Result<ParsedSession> {
             sequence += 1;
             continue;
         }
+        if kind == "turn_context" {
+            if cwd.is_none() {
+                cwd = payload
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+            if let Some(model) = payload.get("model").and_then(Value::as_str) {
+                if !models.iter().any(|value| value == model) {
+                    models.push(model.to_owned());
+                }
+            }
+            sequence += 1;
+            continue;
+        }
+        if kind == "event_msg" {
+            let event_kind = payload.get("type").and_then(Value::as_str);
+            let known = match event_kind {
+                Some("user_message" | "agent_message" | "agent_reasoning") => {
+                    if canonical_event_messages {
+                        let before = events.len();
+                        parse_event_message(
+                            payload,
+                            ParsePayloadContext {
+                                session_id: &session_id,
+                                timestamp,
+                                events: &mut events,
+                                turns: &mut turns,
+                                tool_count: &mut tool_count,
+                                first: &mut first_prompt,
+                                last: &mut last_prompt,
+                            },
+                        );
+                        for event in &mut events[before..] {
+                            event.sequence = sequence;
+                        }
+                    }
+                    true
+                }
+                Some(
+                    "token_count"
+                    | "patch_apply_end"
+                    | "sub_agent_activity"
+                    | "task_started"
+                    | "task_complete"
+                    | "mcp_tool_call_end"
+                    | "thread_settings_applied"
+                    | "context_compacted"
+                    | "web_search_end"
+                    | "turn_aborted"
+                    | "thread_rolled_back",
+                ) => true,
+                _ => false,
+            };
+            if !known {
+                diagnostics.push(Diagnostic {
+                    line: line_number,
+                    code: "unsupported_event".into(),
+                });
+            }
+            sequence += 1;
+            continue;
+        }
+        if matches!(
+            kind,
+            "world_state" | "compacted" | "inter_agent_communication_metadata"
+        ) {
+            sequence += 1;
+            continue;
+        }
         if kind != "response_item" {
             diagnostics.push(Diagnostic {
                 line: line_number,
                 code: "unsupported_event".into(),
             });
+            sequence += 1;
+            continue;
+        }
+        let item_kind = payload.get("type").and_then(Value::as_str);
+        let supported = matches!(
+            item_kind,
+            Some(
+                "message"
+                    | "reasoning"
+                    | "function_call"
+                    | "function_call_output"
+                    | "custom_tool_call"
+                    | "custom_tool_call_output"
+                    | "agent_message"
+            )
+        ) || (item_kind.is_none()
+            && (payload.get("message").is_some() || payload.get("role").is_some()));
+        if !supported {
+            diagnostics.push(Diagnostic {
+                line: line_number,
+                code: "unsupported_event".into(),
+            });
+            sequence += 1;
+            continue;
+        }
+        if item_kind == Some("agent_message")
+            || (canonical_event_messages && matches!(item_kind, Some("message" | "reasoning")))
+        {
             sequence += 1;
             continue;
         }
@@ -382,6 +500,26 @@ struct ParsePayloadContext<'a> {
     last: &'a mut Option<String>,
 }
 
+fn parse_event_message(payload: &Value, context: ParsePayloadContext<'_>) {
+    let normalized = match payload.get("type").and_then(Value::as_str) {
+        Some("user_message") => serde_json::json!({
+            "role": "user",
+            "content": [{ "type": "input_text", "text": payload.get("message") }],
+        }),
+        Some("agent_message") => serde_json::json!({
+            "role": "assistant",
+            "phase": payload.get("phase"),
+            "content": [{ "type": "output_text", "text": payload.get("message") }],
+        }),
+        Some("agent_reasoning") => serde_json::json!({
+            "type": "reasoning",
+            "text": payload.get("text"),
+        }),
+        _ => return,
+    };
+    parse_payload(&normalized, context);
+}
+
 fn parse_payload(payload: &Value, context: ParsePayloadContext<'_>) {
     let ParsePayloadContext {
         session_id,
@@ -397,6 +535,11 @@ fn parse_payload(payload: &Value, context: ParsePayloadContext<'_>) {
         .get("role")
         .and_then(Value::as_str)
         .or_else(|| payload.get("role").and_then(Value::as_str));
+    let assistant_final = role == Some("assistant")
+        && payload
+            .get("phase")
+            .and_then(Value::as_str)
+            .is_none_or(|phase| phase == "final_answer");
     let null_content = Value::Null;
     let content = message
         .get("content")
@@ -405,7 +548,15 @@ fn parse_payload(payload: &Value, context: ParsePayloadContext<'_>) {
     let blocks = if content.is_null()
         && matches!(
             payload.get("type").and_then(Value::as_str),
-            Some("function_call") | Some("function_call_output") | Some("tool_call")
+            Some(
+                "function_call"
+                    | "function_call_output"
+                    | "tool_call"
+                    | "custom_tool_call"
+                    | "custom_tool_call_output"
+                    | "reasoning"
+                    | "thought"
+            )
         ) {
         vec![payload.clone()]
     } else {
@@ -415,9 +566,14 @@ fn parse_payload(payload: &Value, context: ParsePayloadContext<'_>) {
             .unwrap_or_else(|| vec![content.clone()])
     };
     for block in blocks {
-        let (kind, text, tool_name, tool_id, final_response) =
-            match block.get("type").and_then(Value::as_str) {
-                Some("input_text") | Some("output_text") => (
+        let (kind, text, tool_name, tool_id, final_response) = match block
+            .get("type")
+            .and_then(Value::as_str)
+        {
+            Some("input_text") | Some("output_text")
+                if matches!(role, Some("user" | "assistant")) =>
+            {
+                (
                     if role == Some("user") {
                         "user"
                     } else {
@@ -430,75 +586,95 @@ fn parse_payload(payload: &Value, context: ParsePayloadContext<'_>) {
                         .to_owned(),
                     None,
                     None,
-                    role == Some("assistant"),
-                ),
-                Some("function_call") | Some("tool_call") => (
-                    "tool_use",
-                    block
-                        .get("arguments")
-                        .or_else(|| block.get("input"))
-                        .map(|v| v.to_string())
-                        .unwrap_or_default(),
-                    block.get("name").and_then(Value::as_str).map(str::to_owned),
-                    block
-                        .get("call_id")
-                        .or_else(|| block.get("id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    false,
-                ),
-                Some("function_output") | Some("function_call_output") | Some("tool_result") => (
-                    "tool_result",
-                    block
-                        .get("output")
-                        .or_else(|| block.get("content"))
-                        .map(value_text)
-                        .unwrap_or_default(),
-                    block.get("name").and_then(Value::as_str).map(str::to_owned),
-                    block
-                        .get("call_id")
-                        .or_else(|| block.get("id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    false,
-                ),
-                Some("reasoning") | Some("thought") => (
-                    "thinking",
-                    block
-                        .get("text")
-                        .or_else(|| block.get("summary"))
-                        .map(value_text)
-                        .unwrap_or_default(),
-                    None,
-                    None,
-                    false,
-                ),
-                _ => {
-                    if role == Some("user") || role == Some("assistant") {
-                        (
-                            if role == Some("user") {
-                                "user"
-                            } else {
-                                "assistant"
-                            },
-                            value_text(&block),
-                            None,
-                            None,
-                            role == Some("assistant"),
-                        )
-                    } else {
-                        continue;
-                    }
+                    assistant_final,
+                )
+            }
+            Some("input_text") | Some("output_text") => continue,
+            Some("function_call") | Some("tool_call") | Some("custom_tool_call") => (
+                "tool_use",
+                block
+                    .get("arguments")
+                    .or_else(|| block.get("input"))
+                    .map(value_text)
+                    .unwrap_or_default(),
+                block.get("name").and_then(Value::as_str).map(str::to_owned),
+                block
+                    .get("call_id")
+                    .or_else(|| block.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                false,
+            ),
+            Some(
+                "function_output"
+                | "function_call_output"
+                | "tool_result"
+                | "custom_tool_call_output",
+            ) => (
+                "tool_result",
+                block
+                    .get("output")
+                    .or_else(|| block.get("content"))
+                    .map(value_text)
+                    .unwrap_or_default(),
+                block.get("name").and_then(Value::as_str).map(str::to_owned),
+                block
+                    .get("call_id")
+                    .or_else(|| block.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                false,
+            ),
+            Some("reasoning") | Some("thought") => (
+                "thinking",
+                block
+                    .get("text")
+                    .or_else(|| block.get("summary"))
+                    .map(value_text)
+                    .unwrap_or_default(),
+                None,
+                None,
+                false,
+            ),
+            _ => {
+                if role == Some("user") || role == Some("assistant") {
+                    let text = block
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| block.get("text").and_then(Value::as_str).map(str::to_owned))
+                        .unwrap_or_default();
+                    (
+                        if role == Some("user") {
+                            "user"
+                        } else {
+                            "assistant"
+                        },
+                        text,
+                        None,
+                        None,
+                        assistant_final,
+                    )
+                } else {
+                    continue;
                 }
-            };
+            }
+        };
         if text.trim().is_empty() && kind != "tool_use" {
             continue;
         }
         let collapsed = matches!(kind, "tool_use" | "tool_result" | "thinking");
         let event_id = events.len() as i64 + 1;
+        let turn_id = if role == Some("user") {
+            Some(turns.len() as i64 + 1)
+        } else {
+            turns.last().map(|turn| turn.id)
+        };
         if final_response {
             if let Some(previous) = events.iter_mut().rev().find(|event| {
-                event.kind == "assistant" && event.role.as_deref() == Some("assistant")
+                event.kind == "assistant"
+                    && event.role.as_deref() == Some("assistant")
+                    && event.final_response
+                    && event.turn_id == turn_id
             }) {
                 previous.final_response = false;
             }
@@ -521,7 +697,7 @@ fn parse_payload(payload: &Value, context: ParsePayloadContext<'_>) {
             sequence: 0,
             is_sidechain: false,
             is_meta: false,
-            turn_id: None,
+            turn_id,
             final_response,
             compact_boundary: false,
             compact_preserved_ids: Vec::new(),
@@ -544,10 +720,19 @@ fn parse_payload(payload: &Value, context: ParsePayloadContext<'_>) {
         }
         let turn = turns.last_mut();
         if let Some(turn) = turn {
-            if role == Some("assistant") && kind == "assistant" {
+            if final_response {
+                if let Some(previous) = turn
+                    .activities
+                    .iter_mut()
+                    .rev()
+                    .find(|activity| activity.kind == "assistant" && activity.final_response)
+                {
+                    previous.final_response = false;
+                }
                 turn.final_response = Some(text.clone());
                 turn.completed = true;
-            } else if role != Some("user") {
+            }
+            if role != Some("user") {
                 turn.activities.push(TurnActivity {
                     event_id,
                     kind: kind.into(),
@@ -558,7 +743,7 @@ fn parse_payload(payload: &Value, context: ParsePayloadContext<'_>) {
                     tool_use_id: tool_id,
                     parent_tool_use_id: None,
                     collapsed,
-                    final_response: false,
+                    final_response,
                 });
             }
         }
@@ -569,17 +754,26 @@ fn parse_payload(payload: &Value, context: ParsePayloadContext<'_>) {
 }
 
 fn value_text(value: &Value) -> String {
-    value
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| value.get("text").and_then(Value::as_str).map(str::to_owned))
-        .or_else(|| {
-            value
-                .get("output")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| value.to_string())
+    match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        Value::Array(values) => values
+            .iter()
+            .map(value_text)
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(_) => {
+            for key in ["text", "output", "content", "summary"] {
+                let text = value.get(key).map(value_text).unwrap_or_default();
+                if !text.trim().is_empty() {
+                    return text;
+                }
+            }
+            value.to_string()
+        }
+        _ => value.to_string(),
+    }
 }
 fn event_timestamp(value: &Value) -> Option<i64> {
     value.get("timestamp").and_then(Value::as_i64).or_else(|| {
@@ -661,6 +855,71 @@ mod tests {
     }
 
     #[test]
+    fn current_event_stream_keeps_visible_messages_reasoning_and_tools() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"{"timestamp":1,"type":"session_meta","payload":{"session_id":"native","cwd":"/tmp/project","source":"vscode"}}
+{"timestamp":2,"type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":3,"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"hidden instructions"}]}}
+{"timestamp":4,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hidden context"},{"type":"input_text","text":"visible prompt"}]}}
+{"timestamp":5,"type":"turn_context","payload":{"cwd":"/tmp/project","model":"gpt-test"}}
+{"timestamp":6,"type":"event_msg","payload":{"type":"user_message","message":"visible prompt"}}
+{"timestamp":7,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"visible prompt"}]}}
+{"timestamp":8,"type":"event_msg","payload":{"type":"agent_reasoning","text":"checking"}}
+{"timestamp":9,"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"checking"}]}}
+{"timestamp":10,"type":"event_msg","payload":{"type":"agent_message","phase":"commentary","message":"working"}}
+{"timestamp":11,"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"working"}]}}
+{"timestamp":12,"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"call-1","input":"patch"}}
+{"timestamp":13,"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-1","output":"ok"}}
+{"timestamp":14,"type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"done"}}
+{"timestamp":15,"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"done"}]}}
+{"timestamp":16,"type":"world_state","payload":{"full":true}}
+{"timestamp":17,"type":"compacted","payload":{"replacement_history":[]}}
+{"timestamp":18,"type":"inter_agent_communication_metadata","payload":{"trigger_turn":{}}}
+{"timestamp":19,"type":"event_msg","payload":{"type":"task_complete"}}
+"#,
+        )
+        .unwrap();
+
+        let parsed = parse_session(file.path()).unwrap();
+
+        assert!(parsed.diagnostics.is_empty());
+        assert!(!parsed.summary.partial);
+        assert_eq!(
+            parsed.summary.first_prompt.as_deref(),
+            Some("visible prompt")
+        );
+        assert_eq!(parsed.summary.models, vec!["gpt-test"]);
+        assert_eq!(parsed.summary.tool_count, 1);
+        assert_eq!(
+            parsed
+                .events
+                .iter()
+                .map(|event| (event.kind.as_str(), event.content.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("user", "visible prompt"),
+                ("thinking", "checking"),
+                ("assistant", "working"),
+                ("tool_use", "patch"),
+                ("tool_result", "ok"),
+                ("assistant", "done"),
+            ]
+        );
+        assert_eq!(parsed.turns.len(), 1);
+        assert_eq!(parsed.turns[0].final_response.as_deref(), Some("done"));
+        assert!(parsed.turns[0].completed);
+        assert_eq!(
+            parsed.turns[0]
+                .activities
+                .iter()
+                .filter(|activity| activity.final_response)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn discovery_excludes_non_main_rollouts() {
         let root = tempfile::tempdir().unwrap();
         let day = root.path().join("sessions/2026/01/01");
@@ -673,6 +932,11 @@ mod tests {
         fs::write(
             day.join("rollout-child.jsonl"),
             r#"{"type":"session_meta","payload":{"session_id":"child","agent_role":"subagent"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            day.join("rollout-source-child.jsonl"),
+            r#"{"type":"session_meta","payload":{"session_id":"source-child","source":{"subagent":{"thread_spawn":{"parent_thread_id":"main"}}}}}"#,
         )
         .unwrap();
         let found = discover_sources(root.path()).unwrap();

@@ -67,6 +67,7 @@ export const api = {
     update: {
       scanIntervalSeconds: update.scan_interval_seconds,
       enabledProviderIds: update.enabled_provider_ids,
+      providerLookbackDays: update.provider_lookback_days,
     },
   }),
   activateClaudeSourceRoot: (sourceRoot: string | null, replaceActiveIndexAcknowledged: boolean) =>

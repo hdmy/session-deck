@@ -16,9 +16,17 @@ describe('knowledge API payloads', () => {
     expect(invoke).toHaveBeenLastCalledWith('related_sessions', { args: { sessionId: 's1', providerId: 'codex', limit: 5 } });
     await api.semanticSearch('needle', undefined, 3);
     expect(invoke).toHaveBeenLastCalledWith('semantic_search', { args: { query: 'needle', limit: 3 } });
-    await api.updateScanSettings({ scan_interval_seconds: 60, enabled_provider_ids: ['claude', 'codex'] });
+    await api.updateScanSettings({
+      scan_interval_seconds: 60,
+      enabled_provider_ids: ['claude', 'codex'],
+      provider_lookback_days: { codex: 30 },
+    });
     expect(invoke).toHaveBeenLastCalledWith('update_scan_settings', {
-      update: { scanIntervalSeconds: 60, enabledProviderIds: ['claude', 'codex'] },
+      update: {
+        scanIntervalSeconds: 60,
+        enabledProviderIds: ['claude', 'codex'],
+        providerLookbackDays: { codex: 30 },
+      },
     });
   });
 });

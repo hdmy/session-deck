@@ -241,10 +241,10 @@ async function handleRootActivated(report: ScanReport) {
   void report;
 }
 
-function handleScanSettingsChanged(settings: ScanSettings, providersChanged: boolean) {
+function handleScanSettingsChanged(settings: ScanSettings, scanScopeChanged: boolean) {
   scanIntervalSeconds.value = settings.scan_interval_seconds;
   schedule.reschedule(settings.scan_interval_seconds);
-  if (providersChanged) void refresh('manual');
+  if (scanScopeChanged) void refresh('manual');
 }
 
 onMounted(() => {

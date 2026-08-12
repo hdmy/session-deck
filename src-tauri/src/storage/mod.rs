@@ -8,11 +8,11 @@ use crate::providers::ProviderRegistry;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 14;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ClaudeSettings {
@@ -25,6 +25,7 @@ pub struct ClaudeScanSettings {
     pub source_root: Option<String>,
     pub scan_interval_seconds: i64,
     pub enabled_provider_ids: Vec<String>,
+    pub provider_lookback_days: BTreeMap<String, i64>,
 }
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -293,7 +294,8 @@ pub fn migrate(connection: &Connection) -> Result<()> {
             dangerously_skip_permissions INTEGER NOT NULL DEFAULT 0,
             source_root TEXT,
             scan_interval_seconds INTEGER NOT NULL DEFAULT 0,
-                    enabled_provider_ids TEXT NOT NULL DEFAULT '[\"claude\"]'
+            enabled_provider_ids TEXT NOT NULL DEFAULT '[\"claude\"]',
+            provider_lookback_days TEXT NOT NULL DEFAULT '{}'
         );
         INSERT OR IGNORE INTO claude_settings (id, executable_override, dangerously_skip_permissions)
         VALUES (1, NULL, 0);
@@ -384,6 +386,12 @@ pub fn migrate(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    if version < 13 {
+        // Gemini's project/title normalization changed in v13. Dropping only
+        // its derived fingerprints makes the next scan rebuild those rows.
+        connection.execute("DELETE FROM source_files WHERE provider_id = 'gemini'", [])?;
+    }
+
     for (name, definition) in [
         ("workspace_id", "TEXT"),
         ("project_path", "TEXT"),
@@ -425,6 +433,7 @@ pub fn migrate(connection: &Connection) -> Result<()> {
             "enabled_provider_ids",
             "TEXT NOT NULL DEFAULT '[\"claude\"]'",
         ),
+        ("provider_lookback_days", "TEXT NOT NULL DEFAULT '{}'"),
     ] {
         let exists = connection.query_row(
             &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('claude_settings') WHERE name = '{name}')"),
@@ -736,14 +745,15 @@ pub fn claude_settings(connection: &Connection) -> Result<ClaudeSettings> {
 }
 
 pub fn claude_scan_settings(connection: &Connection) -> Result<ClaudeScanSettings> {
-    let (source_root, scan_interval_seconds, enabled_provider_ids) = connection.query_row(
-        "SELECT source_root, scan_interval_seconds, enabled_provider_ids FROM claude_settings WHERE id = 1",
+    let (source_root, scan_interval_seconds, enabled_provider_ids, provider_lookback_days) = connection.query_row(
+        "SELECT source_root, scan_interval_seconds, enabled_provider_ids, provider_lookback_days FROM claude_settings WHERE id = 1",
         [],
         |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         },
     )?;
@@ -751,6 +761,7 @@ pub fn claude_scan_settings(connection: &Connection) -> Result<ClaudeScanSetting
         source_root,
         scan_interval_seconds,
         enabled_provider_ids: serde_json::from_str(&enabled_provider_ids)?,
+        provider_lookback_days: serde_json::from_str(&provider_lookback_days)?,
     })
 }
 
@@ -759,12 +770,27 @@ pub fn update_claude_scan_settings(
     settings: &ClaudeScanSettings,
 ) -> Result<()> {
     let transaction = connection.transaction()?;
+    let previous_lookback_days: BTreeMap<String, i64> =
+        serde_json::from_str(&transaction.query_row(
+            "SELECT provider_lookback_days FROM claude_settings WHERE id = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )?)?;
+    if previous_lookback_days.get("opencode") != settings.provider_lookback_days.get("opencode") {
+        // File providers reconcile individual source mtimes. OpenCode uses one
+        // shared database fingerprint, so a range change must force one rescan.
+        transaction.execute(
+            "DELETE FROM source_files WHERE provider_id = 'opencode'",
+            [],
+        )?;
+    }
     transaction.execute(
-        "UPDATE claude_settings SET source_root = ?, scan_interval_seconds = ?, enabled_provider_ids = ? WHERE id = 1",
+        "UPDATE claude_settings SET source_root = ?, scan_interval_seconds = ?, enabled_provider_ids = ?, provider_lookback_days = ? WHERE id = 1",
         params![
             settings.source_root,
             settings.scan_interval_seconds,
             serde_json::to_string(&settings.enabled_provider_ids)?,
+            serde_json::to_string(&settings.provider_lookback_days)?,
         ],
     )?;
     prune_disabled_provider_data(&transaction, &settings.enabled_provider_ids)?;
@@ -1450,6 +1476,19 @@ pub fn backfill_missing_knowledge(connection: &Connection) -> Result<usize> {
     let created = backfill_missing_knowledge_tx(&tx)?;
     tx.commit()?;
     Ok(created)
+}
+
+pub fn known_project_paths(connection: &Connection) -> Result<Vec<PathBuf>> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT COALESCE(NULLIF(TRIM(project_path), ''), NULLIF(TRIM(cwd), ''))
+         FROM sessions
+         WHERE COALESCE(NULLIF(TRIM(project_path), ''), NULLIF(TRIM(cwd), '')) IS NOT NULL
+         ORDER BY 1",
+    )?;
+    let paths = statement
+        .query_map([], |row| Ok(PathBuf::from(row.get::<_, String>(0)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(paths)
 }
 
 /// Current source manifest, restricted to one provider.  The manifest is

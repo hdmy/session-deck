@@ -113,7 +113,7 @@ describe('App continuation boundary', () => {
     mocks.closeContinuation.mockResolvedValue(undefined);
     mocks.writeContinuation.mockResolvedValue(undefined);
     mocks.resizeContinuation.mockResolvedValue(undefined);
-    mocks.getScanSettings.mockResolvedValue({ source_root: null, effective_root: '/tmp', scan_interval_seconds: 0, enabled_provider_ids: ['claude'] });
+    mocks.getScanSettings.mockResolvedValue({ source_root: null, effective_root: '/tmp', scan_interval_seconds: 0, enabled_provider_ids: ['claude'], provider_lookback_days: {} });
     mocks.pollContinuation.mockImplementation(() => { pollPending = new Promise((resolve) => { releasePoll = resolve; }); return pollPending; });
     root = document.createElement('div');
     document.body.append(root);
