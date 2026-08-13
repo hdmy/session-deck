@@ -44,6 +44,10 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Add macOS targets
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
@@ -73,7 +77,16 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build Tauri app
-        run: pnpm tauri build --ci --no-sign
+        run: pnpm tauri build --ci ${{ runner.os == 'macOS' && '--target universal-apple-darwin' || '' }}
+
+      - name: Package macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          APP_PATH=$(find ./src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -type d -print -quit)
+          test -n "$APP_PATH"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" \
+            "${APP_PATH%.app}.zip"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -86,6 +99,7 @@ jobs:
             ./src-tauri/target/**/bundle/**/*.msi
             ./src-tauri/target/**/bundle/**/*.exe
             ./src-tauri/target/**/bundle/**/*.dmg
+            ./src-tauri/target/**/bundle/**/*.zip
           if-no-files-found: error
 
   release:
