@@ -502,12 +502,12 @@ mod tests {
         let file = executable_script(
             "case \"$1\" in --version) echo version;; --help) echo '--resume --dangerously-skip-permissions';; esac",
         );
-        let result = preflight_with_options(file.to_path_buf(), true).unwrap();
+        let result = preflight_with_options(&file, true).unwrap();
         assert_eq!(result.version.status, Some(0));
 
         let hanging = executable_script("sleep 10");
         let started = Instant::now();
-        let error = preflight(hanging.to_path_buf()).unwrap_err();
+        let error = preflight(&hanging).unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(matches!(error, RuntimeError::PreflightTimeout { .. }));
     }
