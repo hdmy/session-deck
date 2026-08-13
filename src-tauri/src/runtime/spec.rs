@@ -360,14 +360,14 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use tempfile::{tempdir, NamedTempFile};
+    use tempfile::{tempdir, NamedTempFile, TempPath};
 
     #[cfg(unix)]
-    fn executable_script(body: &str) -> NamedTempFile {
+    fn executable_script(body: &str) -> TempPath {
         let file = NamedTempFile::new().unwrap();
         fs::write(file.path(), format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(file.path(), fs::Permissions::from_mode(0o755)).unwrap();
-        file
+        file.into_temp_path()
     }
 
     #[test]
@@ -502,12 +502,12 @@ mod tests {
         let file = executable_script(
             "case \"$1\" in --version) echo version;; --help) echo '--resume --dangerously-skip-permissions';; esac",
         );
-        let result = preflight_with_options(file.path(), true).unwrap();
+        let result = preflight_with_options(file.to_path_buf(), true).unwrap();
         assert_eq!(result.version.status, Some(0));
 
         let hanging = executable_script("sleep 10");
         let started = Instant::now();
-        let error = preflight(hanging.path()).unwrap_err();
+        let error = preflight(hanging.to_path_buf()).unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(matches!(error, RuntimeError::PreflightTimeout { .. }));
     }
