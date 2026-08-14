@@ -1,0 +1,72 @@
+Session Deck Non-Commercial Source-Available License v1.0
+
+Copyright (c) 2026 Session Deck contributors
+
+IMPORTANT: This is a source-available license, not an OSI-approved Open Source
+license.
+
+1. Definitions
+
+"Software" means the source code, object code, documentation, and other
+materials in this repository that are made available under this License.
+
+"Non-Commercial Purpose" means personal use, educational use, academic or
+non-profit research, or use by a non-profit organization that does not use the
+Software to provide a paid product or service.
+
+"Commercial Purpose" means any use by a for-profit person or organization in
+connection with its business, including internal business use, resale,
+distribution as part of a paid product, paid support or consulting, SaaS,
+hosting, managed services, or any other use intended to generate revenue or
+commercial advantage.
+
+2. Non-Commercial Grant
+
+Subject to this License, the copyright holder grants you a worldwide,
+royalty-free, non-exclusive license to use, reproduce, modify, and distribute
+the Software solely for Non-Commercial Purposes.
+
+When you distribute the Software or a modified version for a Non-Commercial
+Purpose, you must:
+
+- retain this License and all copyright notices;
+- clearly mark modified files; and
+- provide recipients with a copy of this License and the same non-commercial
+  use restrictions.
+
+3. Commercial License Required
+
+You may not use, reproduce, modify, distribute, sell, offer, host, or provide
+the Software for a Commercial Purpose without a separate written commercial
+license from the copyright holder. Commercial licensing may be purchased from
+the copyright holder; contact the copyright holder through the project
+repository for licensing terms and pricing.
+
+4. Restrictions
+
+You may not remove or obscure this License or copyright notices. This License
+does not grant any rights to use the names, logos, or trademarks of the
+copyright holder or the project, except as required to truthfully describe the
+origin of the Software.
+
+5. Termination
+
+Your rights under this License terminate automatically if you materially
+violate its terms. Rights may be reinstated only with the copyright holder's
+written permission.
+
+6. Third-Party Materials
+
+Third-party software and other materials included with or referenced by the
+Software may be subject to separate license terms. Those terms continue to
+apply and are not replaced by this License.
+
+7. Disclaimer and Limitation of Liability
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. TO THE MAXIMUM EXTENT
+PERMITTED BY LAW, THE COPYRIGHT HOLDER AND CONTRIBUTORS ARE NOT LIABLE FOR
+ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE
+OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
